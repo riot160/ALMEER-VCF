@@ -1,26 +1,22 @@
 /**
  * ╔═══════════════════════════════════════════╗
  * ║        ALMEER VCF — BACKEND SERVER        ║
- * ║   WhatsApp Number + Bot Verifier v2.0     ║
- * ║   Pairing Code + QR — Railway Ready       ║
+ * ║   WhatsApp Number + Bot Verifier v3.0     ║
+ * ║   Pairing rebuilt from RIOT2 structure    ║
  * ╚═══════════════════════════════════════════╝
- *
- * SETUP (local):
- *   npm install
- *   node almeer-vcf-backend.js
  *
  * ENV VARS:
  *   PORT=3788
- *   PAIRING_NUMBER=254712345678   ← your number, NO + sign, NO spaces
+ *   PAIRING_NUMBER=254712345678   ← digits only, NO + sign, NO spaces
  *   BOT_PING_ENABLED=true
  *   BOT_PING_TIMEOUT=6000
  *   BOT_PING_MESSAGE=.
  *   SESSION_DIR=./almeer_session
  */
 
-import express from 'express';
-import cors from 'cors';
-import pino from 'pino';
+import express  from 'express';
+import cors     from 'cors';
+import pino     from 'pino';
 import { existsSync, mkdirSync } from 'fs';
 import {
   makeWASocket,
@@ -34,13 +30,13 @@ import { Boom } from '@hapi/boom';
 /* ── CONFIG ── */
 const PORT             = process.env.PORT             || 3788;
 const SESSION_DIR      = process.env.SESSION_DIR      || './almeer_session';
-const PAIRING_NUMBER   = (process.env.PAIRING_NUMBER  || '').replace(/[^\d]/g, ''); // strip +, spaces
+const PAIRING_NUMBER   = (process.env.PAIRING_NUMBER  || '').replace(/[^\d]/g, '');
 const BOT_PING_ENABLED = process.env.BOT_PING_ENABLED === 'true';
 const BOT_PING_TIMEOUT = parseInt(process.env.BOT_PING_TIMEOUT || '6000');
 const BOT_PING_MSG     = process.env.BOT_PING_MESSAGE || '.';
 
 /* ── LOGGER ── */
-const logger = pino({ level: 'silent' }); // change to 'debug' for verbose
+const logger = pino({ level: 'silent' });
 
 /* ── GLOBAL STATE ── */
 let sock        = null;
@@ -58,7 +54,7 @@ const delay = (ms)  => new Promise(r => setTimeout(r, ms));
 /* ══════════════════════════════════════════
    BOT PING
 ══════════════════════════════════════════ */
-const pendingPings = new Map(); // jid → resolve fn
+const pendingPings = new Map();
 
 async function pingForBot(jid) {
   return new Promise(async (resolve) => {
@@ -84,82 +80,87 @@ async function pingForBot(jid) {
 }
 
 /* ══════════════════════════════════════════
-   BAILEYS CONNECT
+   BAILEYS CONNECT  — mirrors RIOT2 structure
+   Key fix: pairing code is requested RIGHT
+   after makeWASocket(), NOT inside 'open'.
+   WhatsApp needs the code during the handshake
+   phase; requesting it after 'open' is too late
+   and causes infinite 408 timeout loops.
 ══════════════════════════════════════════ */
-async function startSock() {
+async function startSock(isReconnect = false) {
   const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
   const { version }          = await fetchLatestBaileysVersion();
 
-  /* 1️⃣ Create the socket */
+  /* 1️⃣  Create the socket */
   sock = makeWASocket({
     version,
     logger,
     auth: {
       creds: state.creds,
-      keys: makeCacheableSignalKeyStore(state.keys, logger),
+      keys:  makeCacheableSignalKeyStore(state.keys, logger),
     },
-    printQRInTerminal: !PAIRING_NUMBER,
-    markOnlineOnConnect: false,
+    printQRInTerminal:              false,
+    markOnlineOnConnect:            false,
     generateHighQualityLinkPreview: false,
     browser: ['ALMEER VCF', 'Chrome', '120.0'],
   });
 
-  /* 2️⃣ Save creds whenever they update */
+  /* 2️⃣  Save creds on every update */
   sock.ev.on('creds.update', saveCreds);
 
-  /* 3️⃣ Request pairing code RIGHT AFTER socket creation — NOT inside 'open'
-         WhatsApp waits for the code during the handshake phase.
-         Requesting it after 'open' is too late and causes 408 timeouts. */
-  if (PAIRING_NUMBER && !state.creds.registered) {
-    await delay(2000); // give socket a moment to initialize
+  /* 3️⃣  REQUEST PAIRING CODE HERE — same pattern as RIOT2 session.js
+          - Only on fresh (unregistered) sessions, not reconnects
+          - Wait 3 s after socket init so the WS handshake is ready
+          - Strip any non-digit chars from the number just in case     */
+  if (!isReconnect && PAIRING_NUMBER && !state.creds.registered) {
+    await delay(3000);
     try {
       const code      = await sock.requestPairingCode(PAIRING_NUMBER);
       const formatted = code?.match(/.{1,4}/g)?.join('-') || code;
-      console.log('\n╔══════════════════════════════════════╗');
-      console.log('║      ALMEER VCF — PAIRING CODE        ║');
-      console.log(`║            ${formatted}               ║`);
-      console.log('╠══════════════════════════════════════╣');
-      console.log('║  1. Open WhatsApp on your phone       ║');
-      console.log('║  2. Linked Devices → Link with number ║');
-      console.log('║  3. Enter the 8-digit code above      ║');
-      console.log('╚══════════════════════════════════════╝\n');
+
+      console.log('\n  ┌─────────────────────────────────────┐');
+      console.log('  │     ALMEER VCF — PAIRING CODE        │');
+      console.log('  ├─────────────────────────────────────┤');
+      console.log(`  │  Number : ${PAIRING_NUMBER.padEnd(26)}│`);
+      console.log(`  │  Code   : ${formatted.padEnd(26)}│`);
+      console.log('  ├─────────────────────────────────────┤');
+      console.log('  │  1. Open WhatsApp on your phone      │');
+      console.log('  │  2. Linked Devices → Link a Device   │');
+      console.log('  │  3. Link with phone number           │');
+      console.log('  │  4. Enter the 8-digit code above     │');
+      console.log('  └─────────────────────────────────────┘\n');
     } catch (err) {
       console.error('[ALMEER VCF] Pairing code error:', err.message);
     }
   }
 
-  /* 4️⃣ Connection events */
-  sock.ev.on('connection.update', async ({ connection, lastDisconnect, qr }) => {
+  /* 4️⃣  Connection lifecycle events */
+  sock.ev.on('connection.update', async ({ connection, lastDisconnect }) => {
 
-    /* QR mode fallback */
-    if (qr && !PAIRING_NUMBER) {
-      console.log('[ALMEER VCF] ► Scan QR code above with WhatsApp');
-    }
-
-    /* ── FULLY CONNECTED ── */
     if (connection === 'open') {
       isConnected = true;
-      console.log('[ALMEER VCF] ✔ WhatsApp connected successfully!');
-      console.log(`[ALMEER VCF] ► API ready on port ${PORT}`);
-      console.log(`[ALMEER VCF] ► Bot ping: ${BOT_PING_ENABLED ? 'ENABLED' : 'DISABLED'}`);
+      console.log('[ALMEER VCF] WhatsApp connected successfully!');
+      console.log(`[ALMEER VCF] API ready on port ${PORT}`);
+      console.log(`[ALMEER VCF] Bot ping: ${BOT_PING_ENABLED ? 'ENABLED' : 'DISABLED'}`);
     }
 
-    /* ── DISCONNECTED ── */
     if (connection === 'close') {
       isConnected = false;
-      const statusCode      = new Boom(lastDisconnect?.error)?.output?.statusCode;
-      const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+      const statusCode  = new Boom(lastDisconnect?.error)?.output?.statusCode;
+      const isLoggedOut = statusCode === DisconnectReason.loggedOut;
+
       console.log(`[ALMEER VCF] Disconnected. Code: ${statusCode}`);
-      if (shouldReconnect) {
-        console.log('[ALMEER VCF] Reconnecting in 4s...');
-        setTimeout(startSock, 4000);
+
+      if (isLoggedOut) {
+        console.log('[ALMEER VCF] Logged out — delete the session folder and restart.');
       } else {
-        console.log('[ALMEER VCF] ✘ Logged out — delete session folder and restart.');
+        console.log('[ALMEER VCF] Reconnecting in 5s...');
+        setTimeout(() => startSock(true), 5000);
       }
     }
   });
 
-  /* 5️⃣ Collect incoming messages for bot-ping detection */
+  /* 5️⃣  Incoming messages — used by bot-ping detection */
   sock.ev.on('messages.upsert', ({ messages }) => {
     for (const msg of messages) {
       if (!msg.message || msg.key.fromMe) continue;
@@ -180,11 +181,16 @@ app.use(express.json());
 
 /* GET /health */
 app.get('/health', (_req, res) => {
-  res.json({ status: 'ok', connected: isConnected, botPing: BOT_PING_ENABLED });
+  res.json({
+    status:    'ok',
+    connected: isConnected,
+    botPing:   BOT_PING_ENABLED,
+    number:    PAIRING_NUMBER || 'not set',
+  });
 });
 
 /* POST /verify
-   Body:    { "number": "+254712345678" }
+   Body:    { "number": "254712345678" }
    Returns: { number, jid, onWhatsApp, isBot, allowed }
 */
 app.post('/verify', async (req, res) => {
@@ -194,21 +200,19 @@ app.post('/verify', async (req, res) => {
     return res.status(400).json({ error: 'Missing or invalid number' });
   }
   if (!isConnected || !sock) {
-    return res.status(503).json({ error: 'WhatsApp not connected. Pair first.' });
+    return res.status(503).json({ error: 'WhatsApp not connected yet. Check logs for pairing code.' });
   }
 
   const jid = toJid(number);
 
   try {
-    /* Step 1 — Is this number on WhatsApp? */
-    const [result] = await sock.onWhatsApp(number.replace(/[^\d]/g, ''));
+    const [result]   = await sock.onWhatsApp(number.replace(/[^\d]/g, ''));
     const onWhatsApp = !!(result?.exists);
 
     if (!onWhatsApp) {
       return res.json({ number, jid, onWhatsApp: false, isBot: null, allowed: false });
     }
 
-    /* Step 2 — Does it auto-reply? (bot check) */
     let isBot = null;
     if (BOT_PING_ENABLED) isBot = await pingForBot(jid);
 
@@ -231,9 +235,9 @@ app.listen(PORT, () => {
   console.log('╚═══════════════════════════════════════╝');
   console.log(`[ALMEER VCF] Port        : ${PORT}`);
   console.log(`[ALMEER VCF] Session     : ${SESSION_DIR}`);
-  console.log(`[ALMEER VCF] Pair number : ${PAIRING_NUMBER || 'NOT SET → QR mode'}`);
+  console.log(`[ALMEER VCF] Pair number : ${PAIRING_NUMBER || 'NOT SET — set PAIRING_NUMBER in env!'}`);
   console.log(`[ALMEER VCF] Bot ping    : ${BOT_PING_ENABLED}`);
   console.log('');
 });
 
-startSock();
+startSock(false);
