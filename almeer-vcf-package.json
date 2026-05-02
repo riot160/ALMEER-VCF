@@ -1,0 +1,17 @@
+{
+  "name": "almeer-vcf-backend",
+  "version": "1.0.0",
+  "description": "ALMEER VCF — WhatsApp Number + Bot Verifier Backend",
+  "type": "module",
+  "main": "almeer-vcf-backend.js",
+  "scripts": {
+    "start": "node almeer-vcf-backend.js"
+  },
+  "dependencies": {
+    "@hapi/boom": "^10.0.1",
+    "@whiskeysockets/baileys": "^6.7.9",
+    "cors": "^2.8.5",
+    "express": "^4.18.2",
+    "pino": "^8.19.0"
+  }
+}
